@@ -60,51 +60,71 @@ def speak_text(word):
     t = re.sub(r"\s*/\s*", ", ", word).strip()   # "Bố / Thầy" -> "Bố, Thầy"
     return t.ljust(3, ".")                        # FPT.AI cần tối thiểu 3 ký tự
 
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+TIME_LIMIT = int(os.environ.get("TIME_LIMIT_MIN") or 40) * 60   # hết giờ thì dừng, lưu phần đã xong
+WAIT_FILE = 120                                                  # chờ tối đa 2 phút cho mỗi file
+START = time.time()
+
+def log(*a): print(*a, flush=True)
+
 def tts(region, word, path):
+    if time.time() - START > TIME_LIMIT:
+        return "bỏ qua (hết giờ, lần chạy sau làm tiếp)"
     req = urllib.request.Request(API, data=speak_text(word).encode("utf-8"), method="POST",
-                                 headers={"api-key": KEYS[region], "api_key": KEYS[region], "voice": VOICE[region], "speed": "-1", "format": "mp3"})
+                                 headers={"api-key": KEYS[region], "api_key": KEYS[region], "voice": VOICE[region],
+                                          "speed": "-1", "format": "mp3", "User-Agent": UA})
+    res = None
     for attempt in range(4):
         try:
             res = json.load(urllib.request.urlopen(req, timeout=30))
             break
         except urllib.error.HTTPError as e:
             if e.code in (429, 500, 502, 503) and attempt < 3: time.sleep(10 * (attempt + 1)); continue
-            return f"LỖI {e.code}: {e.read()[:200]!r}"
+            return f"LỖI khi gửi {e.code}: {e.read()[:300].decode('utf-8', 'replace')}"
         except Exception as e:
             if attempt < 3: time.sleep(5); continue
-            return f"LỖI: {e}"
+            return f"LỖI khi gửi: {e}"
     if res.get("error") != 0 or not res.get("async"):
-        return f"LỖI: {res.get('message')}"
-    # File được tạo bất đồng bộ: chờ tối đa ~3 phút cho tới khi tải được
-    for _ in range(60):
+        return f"LỖI FPT.AI trả về: {json.dumps(res, ensure_ascii=False)[:300]}"
+    # File được tạo bất đồng bộ: thử tải lại mỗi 3 giây
+    last, t0 = "chưa có", time.time()
+    while time.time() - t0 < WAIT_FILE:
         time.sleep(3)
         try:
-            r = urllib.request.urlopen(res["async"], timeout=30)
-            data = r.read()
-            if len(data) > 500:
+            data = urllib.request.urlopen(urllib.request.Request(res["async"], headers={"User-Agent": UA}), timeout=30).read()
+            if len(data) > 300:
                 full = os.path.join(ROOT, path)
                 os.makedirs(os.path.dirname(full), exist_ok=True)
                 open(full, "wb").write(data)
                 return "ok"
-        except urllib.error.HTTPError:
-            pass
-        except Exception:
-            pass
-    return "LỖI: chờ quá lâu, lần chạy sau sẽ thử lại"
+            last = f"file rỗng ({len(data)} byte)"
+        except urllib.error.HTTPError as e:
+            last = f"HTTP {e.code}"
+        except Exception as e:
+            last = str(e)[:120]
+    return f"LỖI: chờ 2 phút vẫn chưa tải được file ({last}) — {res['async']}"
 
 def main():
     missing = [r for r, k in KEYS.items() if not k]
     if len(missing) == 3: sys.exit("Chưa có khóa API: hãy dán khóa vào .github/workflows/tao-am-thanh.yml")
-    for r in missing: print(f"⚠ Chưa có khóa cho miền '{r}', bỏ qua miền này.")
+    for r in missing: log(f"⚠ Chưa có khóa cho miền '{r}', bỏ qua miền này.")
     jobs = [j for j in load_words() if j[0] not in missing]
     if MAX_WORDS: jobs = jobs[:MAX_WORDS]
-    print(f"Cần tạo {len(jobs)} file. Giọng: {VOICE}")
-    ok = 0
+    log(f"Cần tạo {len(jobs)} file. Giọng: {VOICE}. Giới hạn {TIME_LIMIT // 60} phút mỗi lần chạy.")
+    if not jobs: return
+    # Thử 1 từ trước: nếu hỏng thì dừng ngay, khỏi tốn thời gian
+    first = tts(*jobs[0]); log(f"[{jobs[0][0]}] {jobs[0][1]} -> {first}")
+    if first != "ok":
+        sys.exit("Từ đầu tiên đã lỗi nên dừng lại. Xem dòng LỖI ở trên.")
+    ok, fails, done = 1, 0, 1
     with ThreadPoolExecutor(max_workers=4) as ex:
-        for (region, word, path), result in zip(jobs, ex.map(lambda j: tts(*j), jobs)):
-            ok += result == "ok"
-            print(f"[{region}] {word} -> {path}: {result}")
-    print(f"Xong: {ok}/{len(jobs)} file mới.")
+        futs = {ex.submit(tts, *j): j for j in jobs[1:]}
+        from concurrent.futures import as_completed
+        for f in as_completed(futs):
+            region, word, path = futs[f]; r = f.result(); done += 1
+            ok += r == "ok"; fails += r.startswith("LỖI")
+            log(f"({done}/{len(jobs)}) [{region}] {word} -> {r}")
+    log(f"Xong: {ok}/{len(jobs)} file mới, {fails} lỗi.")
 
 if __name__ == "__main__":
     main()
