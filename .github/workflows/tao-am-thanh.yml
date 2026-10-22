@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths: ['index.html']        # mỗi lần sửa từ điển (thêm từ mới)
   schedule:
-    - cron: '17 */3 * * *'       # mỗi 3 tiếng: làm tiếp các từ còn thiếu (hết từ thì chạy vài giây là xong)
+    - cron: '17 * * * *'         # mỗi giờ: làm tiếp các từ còn thiếu (đủ hết thì chạy vài giây là xong)
   workflow_dispatch:             # bấm "Run workflow" để chạy tay
     inputs:
       max_words:
@@ -33,16 +33,14 @@ jobs:
       - name: Gọi AI đọc các từ chưa có âm thanh
         run: python -u scripts/tao_am_thanh.py
         env:
-          # ▼▼▼ DÁN 3 KHÓA API VÀO GIỮA HAI DẤU NHÁY ' ' (thay chữ DAN_KHOA_...) ▼▼▼
-          FPT_KEY_BAC: 'oJGOGL5I3s09ZC5Poey7qG6ncXoVZZ5d'
-          FPT_KEY_TRUNG: 'MAE61mhYfk7QmGjvozg4aBnqCBdKPqbd'
-          FPT_KEY_NAM: 'C92DcLisZYayXrgVaxPPqkZjEnu8jYFl'
-          # ▲▲▲ Chỉ sửa 3 dòng trên ▲▲▲
-          FPT_API_KEY: ${{ secrets.FPT_API_KEY }}
-          # Mã giọng của FPT.AI — đổi tại đây nếu muốn giọng khác
-          VOICE_BAC: banmai
-          VOICE_TRUNG: ngoclam
-          VOICE_NAM: linhsan
+          # ▼▼▼ DÁN TOKEN VIETTEL AI VÀO GIỮA HAI DẤU NHÁY ' ' (thay chữ DAN_KHOA_...) ▼▼▼
+          VIETTEL_TOKEN: '2519a4645d07532be966b0079adc9276'
+          # ▲▲▲ Chỉ sửa dòng trên ▲▲▲
+          PROVIDER: viettel
+          # Giọng Viettel AI — đổi tại đây nếu muốn giọng khác
+          VIETTEL_VOICE_BAC: hn-quynhanh      # Bắc: hn-quynhanh, hn-thanhtung (nam), hn-thaochi...
+          VIETTEL_VOICE_TRUNG: hue-maingoc    # Trung (Huế): hue-maingoc (nữ), hue-baoquoc (nam)
+          VIETTEL_VOICE_NAM: hcm-thuyduyen    # Nam: hcm-thuyduyen (Thùy Duyên), hcm-diemmy, hcm-minhquan (nam)...
           MAX_WORDS: ${{ github.event.inputs.max_words || '0' }}
 
       - name: Lưu file âm thanh vào kho

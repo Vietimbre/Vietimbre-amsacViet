@@ -27,6 +27,18 @@ VOICE = {
 }
 MAX_WORDS = int(os.environ.get("MAX_WORDS") or 0)
 
+# ---- Chọn dịch vụ: "viettel" (mặc định) hoặc "fpt" ----
+PROVIDER = (os.environ.get("PROVIDER") or "viettel").strip().lower()
+if PROVIDER == "viettel":
+    API = os.environ.get("VIETTEL_API_URL") or "https://viettelai.vn/tts/speech_synthesis"
+    _tok = _key("VIETTEL_TOKEN")
+    KEYS = {r: _tok for r in ("bac", "trung", "nam")}
+    VOICE = {
+        "bac": os.environ.get("VIETTEL_VOICE_BAC") or "hn-quynhanh",
+        "trung": os.environ.get("VIETTEL_VOICE_TRUNG") or "hue-maingoc",
+        "nam": os.environ.get("VIETTEL_VOICE_NAM") or "hcm-thuyduyen",
+    }
+
 # ---- Tên file kiểu Telex — PHẢI giống hàm audioPath() trong index.html ----
 TONE = {"̀": "f", "́": "s", "̉": "r", "̃": "x", "̣": "j"}
 def telex_syl(syl):
@@ -67,9 +79,40 @@ START = time.time()
 
 def log(*a): print(*a, flush=True)
 
+def save(path, data):
+    full = os.path.join(ROOT, path)
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    open(full, "wb").write(data)
+
+def tts_viettel(region, word, path):
+    body = json.dumps({"text": speak_text(word), "voice": VOICE[region], "speed": 0.9,
+                       "tts_return_option": 3, "token": KEYS[region], "without_filter": False}).encode("utf-8")
+    req = urllib.request.Request(API, data=body, method="POST",
+                                 headers={"Content-Type": "application/json", "Accept": "*/*",
+                                          "token": KEYS[region], "User-Agent": UA})
+    for attempt in range(3):
+        try:
+            data = urllib.request.urlopen(req, timeout=60).read()
+            break
+        except urllib.error.HTTPError as e:
+            msg = e.read()[:300].decode("utf-8", "replace")
+            if e.code == 429: return "HẾT LƯỢT 429: " + msg
+            if e.code in (500, 502, 503) and attempt < 2: time.sleep(10 * (attempt + 1)); continue
+            return f"LỖI khi gửi {e.code}: {msg}"
+        except Exception as e:
+            if attempt < 2: time.sleep(5); continue
+            return f"LỖI khi gửi: {e}"
+    if len(data) > 300 and (data[:3] == b"ID3" or data[0] == 0xFF):
+        save(path, data); return "ok"
+    txt = data[:300].decode("utf-8", "replace")
+    if re.search(r"quota|limit|hết|exceed|balance|ký tự", txt, re.I): return "HẾT LƯỢT: " + txt
+    return f"LỖI Viettel AI trả về: {txt}"
+
 def tts(region, word, path):
     if time.time() - START > TIME_LIMIT:
         return "bỏ qua (hết giờ, lần chạy sau làm tiếp)"
+    if PROVIDER == "viettel":
+        return tts_viettel(region, word, path)
     req = urllib.request.Request(API, data=speak_text(word).encode("utf-8"), method="POST",
                                  headers={"api-key": KEYS[region], "api_key": KEYS[region], "voice": VOICE[region],
                                           "speed": "-1", "format": "mp3", "User-Agent": UA})
@@ -79,7 +122,8 @@ def tts(region, word, path):
             res = json.load(urllib.request.urlopen(req, timeout=30))
             break
         except urllib.error.HTTPError as e:
-            if e.code in (429, 500, 502, 503) and attempt < 3: time.sleep(10 * (attempt + 1)); continue
+            if e.code == 429: return "HẾT LƯỢT 429: " + e.read()[:200].decode("utf-8", "replace")
+            if e.code in (500, 502, 503) and attempt < 3: time.sleep(10 * (attempt + 1)); continue
             return f"LỖI khi gửi {e.code}: {e.read()[:300].decode('utf-8', 'replace')}"
         except Exception as e:
             if attempt < 3: time.sleep(5); continue
@@ -104,27 +148,48 @@ def tts(region, word, path):
             last = str(e)[:120]
     return f"LỖI: chờ 2 phút vẫn chưa tải được file ({last}) — {res['async']}"
 
+DELAY = int(os.environ.get("DELAY_S") or 20)   # nghỉ giữa 2 lượt gọi để không vượt giới hạn gói miễn phí
+
+def note(kind, title, msg):
+    log(f"::{kind} title={title}::{msg}")
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8").write(f"### {title}\n\n{msg}\n\n")
+
 def main():
     missing = [r for r, k in KEYS.items() if not k]
-    if len(missing) == 3: sys.exit("Chưa có khóa API: hãy dán khóa vào .github/workflows/tao-am-thanh.yml")
+    if len(missing) == 3: sys.exit(f"Chưa có khóa/token cho {PROVIDER}: hãy dán vào .github/workflows/tao-am-thanh.yml")
     for r in missing: log(f"⚠ Chưa có khóa cho miền '{r}', bỏ qua miền này.")
     jobs = [j for j in load_words() if j[0] not in missing]
+    # xen kẽ Bắc - Trung - Nam để cả ba miền cùng có dần
+    by = {r: [j for j in jobs if j[0] == r] for r in ("bac", "trung", "nam")}
+    jobs = [x for grp in zip(*[by[r] + [None] * (max(map(len, by.values())) - len(by[r])) for r in by]) for x in grp if x]
     if MAX_WORDS: jobs = jobs[:MAX_WORDS]
-    log(f"Cần tạo {len(jobs)} file. Giọng: {VOICE}. Giới hạn {TIME_LIMIT // 60} phút mỗi lần chạy.")
-    if not jobs: return
-    # Thử 1 từ trước: nếu hỏng thì dừng ngay, khỏi tốn thời gian
-    first = tts(*jobs[0]); log(f"[{jobs[0][0]}] {jobs[0][1]} -> {first}")
-    if first != "ok":
-        sys.exit("Từ đầu tiên đã lỗi nên dừng lại. Xem dòng LỖI ở trên.")
-    ok, fails, done = 1, 0, 1
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        futs = {ex.submit(tts, *j): j for j in jobs[1:]}
-        from concurrent.futures import as_completed
-        for f in as_completed(futs):
-            region, word, path = futs[f]; r = f.result(); done += 1
-            ok += r == "ok"; fails += r.startswith("LỖI")
-            log(f"({done}/{len(jobs)}) [{region}] {word} -> {r}")
-    log(f"Xong: {ok}/{len(jobs)} file mới, {fails} lỗi.")
+    log(f"Dịch vụ: {PROVIDER}. Còn thiếu {len(jobs)} file. Giọng: {VOICE}. Mỗi lượt cách nhau {DELAY}s, tối đa {TIME_LIMIT // 60} phút.")
+    ok, fails, out_of_quota, errs = 0, 0, set(), []
+    for n, (region, word, path) in enumerate(jobs, 1):
+        if region in out_of_quota: continue
+        if time.time() - START > TIME_LIMIT:
+            log("Hết giờ của lần chạy này, lần sau sẽ làm tiếp."); break
+        r = tts(region, word, path)
+        log(f"({n}/{len(jobs)}) [{region}] {word} -> {r}")
+        if r == "ok": ok += 1
+        elif r.startswith("HẾT LƯỢT"):
+            out_of_quota.add(region)
+            log(f"⏸ Khóa miền '{region}' đã hết lượt miễn phí, tạm dừng miền này.")
+            if len(out_of_quota | set(missing)) == 3: break
+            continue
+        else:
+            fails += 1; errs.append(f"[{region}] {word}: {r}")
+            if fails >= 5 and ok == 0:
+                note("error", f"{PROVIDER} báo lỗi", " | ".join(errs[:3])); sys.exit(1)
+        time.sleep(DELAY)
+    left = len(load_words())
+    log(f"Lần này tạo được {ok} file. Còn thiếu {left} file.")
+    if out_of_quota and ok == 0:
+        note("warning", f"{PROVIDER} tạm hết lượt",
+             f"Các miền {sorted(out_of_quota)} đang bị giới hạn (lỗi 429). Không sao — mỗi giờ hệ thống tự thử lại, còn thiếu {left} file.")
+    elif ok:
+        note("notice", "Đã tạo âm thanh", f"Lần này tạo thêm {ok} file, còn thiếu {left} file.")
 
 if __name__ == "__main__":
     main()
