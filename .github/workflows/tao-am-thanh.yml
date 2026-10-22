@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: write
+  actions: write                 # để tự bấm "chạy tiếp" khi còn từ thiếu
 
 concurrency:
   group: tao-am-thanh
@@ -31,6 +32,7 @@ jobs:
           python-version: '3.12'
 
       - name: Gọi AI đọc các từ chưa có âm thanh
+        id: tao
         run: python -u scripts/tao_am_thanh.py
         env:
           # ▼▼▼ DÁN TOKEN VIETTEL AI VÀO GIỮA HAI DẤU NHÁY ' ' (thay chữ DAN_KHOA_...) ▼▼▼
@@ -57,3 +59,9 @@ jobs:
             git pull --rebase
             git push
           fi
+
+      - name: Còn từ thiếu thì tự chạy tiếp ngay
+        if: success() && steps.tao.outputs.ok != '' && steps.tao.outputs.ok != '0' && steps.tao.outputs.left != '0' && (github.event.inputs.max_words || '0') == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run tao-am-thanh.yml --ref main -f max_words=0

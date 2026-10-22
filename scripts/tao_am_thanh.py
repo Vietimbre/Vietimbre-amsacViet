@@ -11,7 +11,14 @@ Biến môi trường:
   MAX_WORDS     số từ tối đa mỗi lần chạy (0 = không giới hạn)
 """
 import json, os, re, sys, time, unicodedata, urllib.request, urllib.error
+import socket
 from concurrent.futures import ThreadPoolExecutor
+
+# Máy chủ GitHub hay treo khi thử IPv6 ("Network is unreachable") -> chỉ dùng IPv4 cho nhanh
+_getaddrinfo = socket.getaddrinfo
+def _ipv4_only(host, port, family=0, type=0, proto=0, flags=0):
+    return _getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+socket.getaddrinfo = _ipv4_only
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 API = os.environ.get("FPT_API_URL") or "https://api.fpt.ai/hmi/tts/v5"
@@ -92,7 +99,7 @@ def tts_viettel(region, word, path):
                                           "token": KEYS[region], "User-Agent": UA})
     for attempt in range(3):
         try:
-            data = urllib.request.urlopen(req, timeout=60).read()
+            data = urllib.request.urlopen(req, timeout=40).read()
             break
         except urllib.error.HTTPError as e:
             msg = e.read()[:300].decode("utf-8", "replace")
@@ -148,7 +155,7 @@ def tts(region, word, path):
             last = str(e)[:120]
     return f"LỖI: chờ 2 phút vẫn chưa tải được file ({last}) — {res['async']}"
 
-DELAY = int(os.environ.get("DELAY_S") or 20)   # nghỉ giữa 2 lượt gọi để không vượt giới hạn gói miễn phí
+DELAY = int(os.environ.get("DELAY_S") or 5)   # nghỉ giữa 2 lượt gọi để không vượt giới hạn gói miễn phí
 
 def note(kind, title, msg):
     log(f"::{kind} title={title}::{msg}")
@@ -170,8 +177,8 @@ def main():
         if region in out_of_quota: continue
         if time.time() - START > TIME_LIMIT:
             log("Hết giờ của lần chạy này, lần sau sẽ làm tiếp."); break
-        r = tts(region, word, path)
-        log(f"({n}/{len(jobs)}) [{region}] {word} -> {r}")
+        t1 = time.time(); r = tts(region, word, path)
+        log(f"({n}/{len(jobs)}) [{region}] {word} -> {r}  ({time.time() - t1:.0f}s)")
         if r == "ok": ok += 1
         elif r.startswith("HẾT LƯỢT"):
             out_of_quota.add(region)
@@ -185,6 +192,8 @@ def main():
         time.sleep(DELAY)
     left = len(load_words())
     log(f"Lần này tạo được {ok} file. Còn thiếu {left} file.")
+    if os.environ.get("GITHUB_OUTPUT"):
+        open(os.environ["GITHUB_OUTPUT"], "a").write(f"ok={ok}\nleft={left}\n")
     if out_of_quota and ok == 0:
         note("warning", f"{PROVIDER} tạm hết lượt",
              f"Các miền {sorted(out_of_quota)} đang bị giới hạn (lỗi 429). Không sao — mỗi giờ hệ thống tự thử lại, còn thiếu {left} file.")
